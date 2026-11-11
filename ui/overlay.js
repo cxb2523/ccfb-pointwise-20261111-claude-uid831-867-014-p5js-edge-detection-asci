@@ -47,7 +47,6 @@ class Overlay {
             options: [
                 { text: "sketch", value: "sketch" },
                 { text: "sobel", value: "sobel" },
-                { text: "sobel sample", value: "sobel sample" },
                 { text: "ascii", value: "ascii" },
                 { text: "ascii + edges", value: "ascii + edges" }
             ],

@@ -10,11 +10,13 @@
  * It includes the setup and draw functions, which are the main entry points for p5.js. 
  * It also includes the logic for resizing the window, and preloading necessary assets.
  * 
- * A Sobel edge detection shader that calculates the gradient using convolution with Sobel kernels. 
+ * A Sobel edge detection shader that calculates the gradient using convolution with Sobel kernels.
  * It detects edges by computing the gradient magnitude and direction, highlighting edges based on their orientation.
- * 
- * A sample shader is used to convert the sobel edge detection output to a grid of single colored rectangles, which
- * is later used to render the ascii characters for the edges.
+ * The same shader also implements a separable gaussian blur (horizontal/vertical passes selected via a uniform),
+ * which is applied as a configurable pre-processing step before the edge detection to suppress noise.
+ *
+ * The sobel pass outputs an edge confidence (with a soft threshold), the edge direction and the blurred
+ * luminance per pixel, which the ascii shader uses to pick edge or brightness characters per grid cell.
  * 
  * The ascii brightness and edge buffer use the same shader in different modes. 
  * The brightness buffer uses the shader to convert the brightness of the scene to ASCII characters.
@@ -48,8 +50,9 @@ const PARAMS = {
 	asciiEdgesCharacterColor: "#ffffff",
 	asciiEdgesBackgroundColor: "#000000",
 
-	sobelThreshold: 0.5, // Threshold for the sobel filter
-	sobelSampleThreshold: 1, // Threshold for the edge sampling (How many pixels need to be non-black in a grid cell to be considered as an edge?)
+	blurRadius: 0, // Gaussian blur radius in pixels (0 disables the blur passes, capped at 8)
+	blurSigma: 0, // Gaussian blur sigma (0 falls back to radius / 2)
+	edgeThreshold: 0.5, // Threshold for the edge detection (applied with a soft smoothstep on the gradient magnitude)
 
 	selectedDisplayFramebuffer: "ascii + edges", // Which framebuffer to display on the canvas
 
@@ -78,15 +81,15 @@ let edgesCharacterSet; // The character set object, which is used for the edge a
 let brightnessCharacterSet; // The character set object, which is used for the brightness ascii shader
 
 let sketchFramebuffer; // All the framebuffers, which are for the rendering pipeline
+let blurFramebufferA; // Ping-pong framebuffers for the separable gaussian blur (horizontal -> vertical)
+let blurFramebufferB;
 let sobelFramebuffer;
-let sobelSampleFramebuffer;
 let asciiBrightnessFramebuffer;
 let asciiEdgesFramebuffer;
 
 let displayFramebuffer; // The framebuffer, which is displayed on the canvas (It can be any of the framebuffers above)
 
 let sobelShader; // All the shaders, which are used in the rendering pipeline
-let sampleShader;
 let asciiShader;
 
 let overlay; // The tweakpane overlay object, which allows modification of certain parameters during runtime
@@ -103,7 +106,6 @@ function preload() {
 	asciiFont = loadFont(PARAMS.asciiFontData);
 
 	sobelShader = loadShader("shaders/vert/shader.vert", "shaders/frag/sobel.frag");
-	sampleShader = loadShader("shaders/vert/shader.vert", "shaders/frag/sample.frag");
 	asciiShader = loadShader("shaders/vert/shader.vert", "shaders/frag/ascii.frag");
 }
 
@@ -121,8 +123,9 @@ function setup() {
 	grid = new Grid({ cellWidth: edgesCharacterSet.maxGlyphDimensions.width, cellHeight: edgesCharacterSet.maxGlyphDimensions.height });
 
 	sketchFramebuffer = createFramebuffer({ format: FLOAT });
+	blurFramebufferA = createFramebuffer({ format: FLOAT });
+	blurFramebufferB = createFramebuffer({ format: FLOAT });
 	sobelFramebuffer = createFramebuffer({ format: FLOAT });
-	sobelSampleFramebuffer = createFramebuffer({ format: FLOAT, width: grid.cols, height: grid.rows });
 	asciiBrightnessFramebuffer = createFramebuffer({ format: FLOAT });
 	asciiEdgesFramebuffer = createFramebuffer({ format: FLOAT });
 
@@ -157,29 +160,49 @@ function draw() {
 	pop();
 	sketchFramebuffer.end();
 
-	sobelFramebuffer.begin(); // Apply the sobel shader to the sketch buffer and store the result in the sobel buffer
+	const blurRadius = Math.min(Math.max(Math.round(PARAMS.blurRadius), 0), 8); // Clamp the radius to the shader's MAX_RADIUS
+	const blurActive = blurRadius > 0; // Skip the blur passes entirely when the radius is 0
+
+	if (blurActive) { // Separable gaussian blur: source -> horizontal (ping) -> vertical (pong)
+		blurFramebufferA.begin(); // Horizontal blur pass
+		shader(sobelShader);
+		sobelShader.setUniform('uPass', 0);
+		sobelShader.setUniform('u_texture', sketchFramebuffer);
+		sobelShader.setUniform('u_textureSize', [windowWidth, windowHeight]);
+		sobelShader.setUniform('uRadius', blurRadius);
+		sobelShader.setUniform('uSigma', PARAMS.blurSigma);
+		rect(0, 0, windowWidth, windowHeight);
+		blurFramebufferA.end();
+
+		blurFramebufferB.begin(); // Vertical blur pass
+		shader(sobelShader);
+		sobelShader.setUniform('uPass', 1);
+		sobelShader.setUniform('u_texture', blurFramebufferA);
+		sobelShader.setUniform('u_textureSize', [windowWidth, windowHeight]);
+		sobelShader.setUniform('uRadius', blurRadius);
+		sobelShader.setUniform('uSigma', PARAMS.blurSigma);
+		rect(0, 0, windowWidth, windowHeight);
+		blurFramebufferB.end();
+	}
+
+	const processedSource = blurActive ? blurFramebufferB : sketchFramebuffer; // The (optionally blurred) source for the following passes
+
+	sobelFramebuffer.begin(); // Apply the sobel shader to the (blurred) source and store the result in the sobel buffer
 	shader(sobelShader);
-	sobelShader.setUniform('u_texture', sketchFramebuffer);
+	sobelShader.setUniform('uPass', 2);
+	sobelShader.setUniform('u_texture', processedSource);
 	sobelShader.setUniform('u_textureSize', [windowWidth, windowHeight]);
-	sobelShader.setUniform('u_threshold', PARAMS.sobelThreshold);
+	sobelShader.setUniform('uThreshold', PARAMS.edgeThreshold);
 	rect(0, 0, windowWidth, windowHeight);
 	sobelFramebuffer.end();
 
-	sobelSampleFramebuffer.begin(); // Apply the sample shader to the sobel buffer and store the result in the sample buffer
-	shader(sampleShader);
-	sampleShader.setUniform('u_image', sobelFramebuffer);
-	sampleShader.setUniform('u_gridCellDimensions', [grid.cols, grid.rows]);
-	sampleShader.setUniform('u_threshold', PARAMS.sobelSampleThreshold);
-	rect(0, 0, windowWidth, windowHeight);
-	sobelSampleFramebuffer.end();
-
-	asciiBrightnessFramebuffer.begin(); // Apply the ascii brightness shader to the sketch buffer and store the result in the ascii brightness buffer
+	asciiBrightnessFramebuffer.begin(); // Apply the ascii brightness shader to the (blurred) source and store the result in the ascii brightness buffer
 	shader(asciiShader);
 	asciiShader.setUniform('u_characterTexture', brightnessCharacterSet.texture);
 	asciiShader.setUniform('u_charsetCols', brightnessCharacterSet.charsetCols);
 	asciiShader.setUniform('u_charsetRows', brightnessCharacterSet.charsetRows);
 	asciiShader.setUniform('u_totalChars', brightnessCharacterSet.characters.length);
-	asciiShader.setUniform('u_sketchTexture', sketchFramebuffer); // Used for coloring the ascii characters and determining the character based on brightness
+	asciiShader.setUniform('u_sketchTexture', processedSource); // Used for coloring the ascii characters and determining the character based on brightness
 	asciiShader.setUniform('u_gridCellDimensions', [grid.cols, grid.rows]);
 	asciiShader.setUniform('u_gridPixelDimensions', [grid.width, grid.height]);
 	asciiShader.setUniform('u_gridOffsetDimensions', [grid.offsetX, grid.offsetY]);
@@ -192,15 +215,18 @@ function draw() {
 	rect(0, 0, windowWidth, windowHeight);
 	asciiBrightnessFramebuffer.end();
 
-	asciiEdgesFramebuffer.begin(); // Apply the ascii edges shader to the sample buffer and store the result in the ascii edges buffer
+	asciiEdgesFramebuffer.begin(); // Apply the ascii edges shader to the sobel buffer and store the result in the ascii edges buffer
 	shader(asciiShader);
 	asciiShader.setUniform('u_characterTexture', edgesCharacterSet.texture);
 	asciiShader.setUniform('u_charsetCols', edgesCharacterSet.charsetCols);
 	asciiShader.setUniform('u_charsetRows', edgesCharacterSet.charsetRows);
 	asciiShader.setUniform('u_totalChars', edgesCharacterSet.characters.length);
-	asciiShader.setUniform('u_edgesTexture', sobelSampleFramebuffer); // Used for detecting the edges to apply the edge characters to
-	asciiShader.setUniform('u_sketchTexture', sketchFramebuffer); // Used for coloring the edge characters
-	asciiShader.setUniform('u_asciiBrightnessTexture', asciiBrightnessFramebuffer); // If no edge is present, apply the pixel from the brightness ascii buffer
+	asciiShader.setUniform('u_brightnessCharacterTexture', brightnessCharacterSet.texture); // Brightness charset for the fallback characters of suppressed edges
+	asciiShader.setUniform('u_brightnessCharsetCols', brightnessCharacterSet.charsetCols);
+	asciiShader.setUniform('u_brightnessCharsetRows', brightnessCharacterSet.charsetRows);
+	asciiShader.setUniform('u_brightnessTotalChars', brightnessCharacterSet.characters.length);
+	asciiShader.setUniform('u_edgesTexture', sobelFramebuffer); // Edge confidence, direction and blurred luminance per pixel
+	asciiShader.setUniform('u_sketchTexture', processedSource); // Used for coloring the edge characters
 	asciiShader.setUniform('u_gridCellDimensions', [grid.cols, grid.rows]);
 	asciiShader.setUniform('u_gridPixelDimensions', [grid.width, grid.height]);
 	asciiShader.setUniform('u_gridOffsetDimensions', [grid.offsetX, grid.offsetY]);
@@ -239,12 +265,17 @@ function windowResized() {
 }
 
 /**
- * Resizes the sample framebuffer when the grid dimensions change.
+ * Resizes all framebuffers to the current window dimensions.
  * @function resizeFramebuffers
  * @global
  */
 function resizeFramebuffers() {
-	sobelSampleFramebuffer.resize(grid.cols, grid.rows);
+	sketchFramebuffer.resize(windowWidth, windowHeight);
+	blurFramebufferA.resize(windowWidth, windowHeight);
+	blurFramebufferB.resize(windowWidth, windowHeight);
+	sobelFramebuffer.resize(windowWidth, windowHeight);
+	asciiBrightnessFramebuffer.resize(windowWidth, windowHeight);
+	asciiEdgesFramebuffer.resize(windowWidth, windowHeight);
 }
 
 /**
@@ -259,8 +290,6 @@ function updateDisplayFramebuffer(selectedFramebufferId) {
 		displayFramebuffer = sketchFramebuffer;
 	} else if (PARAMS.selectedDisplayFramebuffer === "sobel") {
 		displayFramebuffer = sobelFramebuffer;
-	} else if (PARAMS.selectedDisplayFramebuffer === "sobel sample") {
-		displayFramebuffer = sobelSampleFramebuffer;
 	} else if (PARAMS.selectedDisplayFramebuffer === "ascii") {
 		displayFramebuffer = asciiBrightnessFramebuffer;
 	} else if (PARAMS.selectedDisplayFramebuffer === "ascii + edges") {

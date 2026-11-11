@@ -87,9 +87,12 @@ class AsciiView extends EventEmitter {
         this.asciiEdgesFolder.addInput(PARAMS, 'asciiEdgesCharacterColor', { label: 'char color' });
         this.asciiEdgesFolder.addInput(PARAMS, 'asciiEdgesBackgroundColor', { label: 'bg color' });
 
+        this.asciiEdgesBlurFolder = this.asciiEdgesFolder.addFolder({ title: 'blur (pre-processing)' });
+        this.asciiEdgesBlurFolder.addInput(PARAMS, 'blurRadius', { label: 'radius', min: 0, max: 8, step: 1 });
+        this.asciiEdgesBlurFolder.addInput(PARAMS, 'blurSigma', { label: 'sigma (0 = auto)', min: 0, max: 8, step: 0.1 });
+
         this.asciiEdgesThresholdsFolder = this.asciiEdgesFolder.addFolder({ title: 'thresholds' });
-        this.asciiEdgesThresholdsFolder.addInput(PARAMS, 'sobelThreshold', { label: 'sobel', min: 0.01, max: 1, step: 0.01 });
-        this.asciiEdgesThresholdsFolder.addInput(PARAMS, 'sobelSampleThreshold', { label: 'sampling', min: 1, max: 64, step: 1 });
+        this.asciiEdgesThresholdsFolder.addInput(PARAMS, 'edgeThreshold', { label: 'edge', min: 0.01, max: 1, step: 0.01 });
     }
 
     /**
